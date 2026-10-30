@@ -1,151 +1,98 @@
-#!/bin/bash
-# ==============================================================================
-# Custom Browser OS Builder (Debian 12 Bookworm Live)
-# Target Hardware: Intel Core i7-3770S | GTX 750 1GB | 12GB DDR3 RAM
-# Features: Full Google Chrome, Proton VPN, PCManFM, Strict Internal Disk Lock
-# ==============================================================================
+name: Build Browser OS ISO
 
-set -e
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
 
-WORKDIR="$HOME/browser-os-build"
-echo "[+] Preparing build environment..."
-sudo apt-get update
-sudo apt-get install -y live-build debootstrap curl wget gnupg squashfs-tools xorriso isolinux syslinux-efi
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-mkdir -p "$WORKDIR"
-cd "$WORKDIR"
-lb clean --purge || true
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y live-build debootstrap curl wget gnupg squashfs-tools xorriso isolinux syslinux-efi
 
-# 1. إعداد هيكلية النظام وإلغاء المثبت وتمرير أوامر النواة الأمنية
-# ملاحظة: modprobe.blacklist يعطل متحكمات SATA و NVMe الداخلية بالكامل ويبقي منافذ USB فقط
-lb config noauto \
-  --distribution bookworm \
-  --architectures amd64 \
-  --linux-flavours amd64 \
-  --archive-areas "main contrib non-free non-free-firmware" \
-  --binary-images iso-hybrid \
-  --debian-installer false \
-  --apt-recommends false \
-  --bootappend-live "boot=live components quiet splash locales=en_US.UTF-8 keyboard-layouts=us,ara keyboard-options=grp:alt_shift_toggle modprobe.blacklist=ahci,ata_piix,ata_generic,pata_acpi,nvme,nvme_core"
+      - name: Build ISO
+        run: |
+          mkdir -p browser-os && cd browser-os
+          lb config noauto \
+            --distribution bookworm \
+            --architectures amd64 \
+            --linux-flavours amd64 \
+            --archive-areas "main contrib non-free non-free-firmware" \
+            --binary-images iso-hybrid \
+            --debian-installer false \
+            --apt-recommends false \
+            --bootappend-live "boot=live components quiet splash locales=en_US.UTF-8 keyboard-layouts=us,ara keyboard-options=grp:alt_shift_toggle modprobe.blacklist=ahci,ata_piix,ata_generic,pata_acpi,nvme,nvme_core"
 
-# 2. تحديد الحزم الأساسية والتعريفات المتوافقة مع i7-3770S و GTX 750
-mkdir -p config/package-lists
-cat << 'EOF' > config/package-lists/browser-os.list.chroot
-xserver-xorg-core
-xserver-xorg-video-nouveau
-xserver-xorg-input-all
-x11-xserver-utils
-xinit
-openbox
-obconf
-tint2
-pcmanfm
-lxterminal
-network-manager
-network-manager-gnome
-pulseaudio
-pavucontrol
-alsa-utils
-intel-microcode
-firmware-misc-nonfree
-firmware-linux-nonfree
-firmware-realtek
-mesa-utils
-libgl1-mesa-dri
-curl
-wget
-gnupg
-ca-certificates
-apt-transport-https
-fonts-noto-core
-fonts-noto-color-emoji
-fonts-dejavu-core
-sudo
-EOF
+          mkdir -p config/package-lists
+          cat << 'EOF' > config/package-lists/custom.list.chroot
+          xserver-xorg-core
+          xserver-xorg-video-nouveau
+          xserver-xorg-input-all
+          x11-xserver-utils
+          xinit
+          openbox
+          tint2
+          pcmanfm
+          lxterminal
+          network-manager
+          network-manager-gnome
+          pulseaudio
+          pavucontrol
+          intel-microcode
+          firmware-misc-nonfree
+          firmware-realtek
+          libgl1-mesa-dri
+          curl
+          wget
+          gnupg
+          ca-certificates
+          fonts-noto-core
+          fonts-noto-color-emoji
+          sudo
+          EOF
 
-# 3. سكربت تثبيت Google Chrome الرسمي و Proton VPN داخل النظام
-mkdir -p config/hooks/normal
-cat << 'EOF' > config/hooks/normal/0500-install-chrome-proton.hook.chroot
-#!/bin/bash
-set -e
+          mkdir -p config/hooks/normal
+          cat << 'EOF' > config/hooks/normal/0500-apps.hook.chroot
+          #!/bin/bash
+          set -e
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+          wget -q -O /tmp/proton.deb https://repo.protonvpn.com/debian/dists/stable/main/binary-all/protonvpn-stable-release_1.0.8_all.deb
+          dpkg -i /tmp/proton.deb && rm -f /tmp/proton.deb
+          apt-get update
+          apt-get install -y --no-install-recommends google-chrome-stable proton-vpn-gnome-desktop
+          apt-get clean
+          EOF
+          chmod +x config/hooks/normal/0500-apps.hook.chroot
 
-# تثبيت متصفح Google Chrome المستقر بكامل الميزات
-wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
-echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+          mkdir -p config/includes.chroot/etc/udev/rules.d
+          echo 'SUBSYSTEM=="block", ENV{ID_BUS}!="usb", ENV{UDISKS_IGNORE}="1", OPTIONS+="ignore_device"' > config/includes.chroot/etc/udev/rules.d/99-no-internal-disks.rules
 
-# تثبيت مستودع وتطبيق Proton VPN الرسمي
-wget -q -O /tmp/protonvpn-stable-release.deb https://repo.protonvpn.com/debian/dists/stable/main/binary-all/protonvpn-stable-release_1.0.8_all.deb
-dpkg -i /tmp/protonvpn-stable-release.deb
-rm -f /tmp/protonvpn-stable-release.deb
+          mkdir -p config/includes.chroot/etc/xdg/openbox
+          cat << 'EOF' > config/includes.chroot/etc/xdg/openbox/autostart
+          setxkbmap -layout "us,ara" -option "grp:alt_shift_toggle" &
+          xset s off -dpms &
+          tint2 &
+          nm-applet &
+          google-chrome-stable --start-maximized --no-first-run --no-default-browser-check &
+          EOF
 
-apt-get update
-apt-get install -y --no-install-recommends google-chrome-stable proton-vpn-gnome-desktop
-apt-get clean
-EOF
-chmod +x config/hooks/normal/0500-install-chrome-proton.hook.chroot
+          mkdir -p config/includes.chroot/etc/profile.d
+          cat << 'EOF' > config/includes.chroot/etc/profile.d/autostartx.sh
+          if [ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then startx; fi
+          EOF
 
-# 4. طبقة أمان إضافية (Udev Rule): منع قراءة أو إظهار أي قرص غير الفلاشة
-mkdir -p config/includes.chroot/etc/udev/rules.d
-cat << 'EOF' > config/includes.chroot/etc/udev/rules.d/99-isolate-internal-disks.rules
-# حجب أي قرص لا يعمل عبر ناقل USB عن النظام وعن متصفح الملفات نهائياً
-SUBSYSTEM=="block", ENV{ID_BUS}!="usb", ENV{UDISKS_IGNORE}="1", OPTIONS+="ignore_device"
-EOF
+          sudo lb build
 
-# 5. ضبط الإقلاع التلقائي للواجهة ومتصفح كروم وإعدادات الكيبورد (EN/AR)
-mkdir -p config/includes.chroot/etc/xdg/openbox
-cat << 'EOF' > config/includes.chroot/etc/xdg/openbox/autostart
-# ضبط لغة الكيبورد: الإنجليزية والعربية مع التبديل عبر Alt+Shift
-setxkbmap -layout "us,ara" -option "grp:alt_shift_toggle" &
-
-# منع انطفاء الشاشة أثناء التصفح
-xset s off -dpms &
-
-# تشغيل شريط المهام الخفيف وأيقونة الشبكة
-tint2 &
-nm-applet &
-
-# تشغيل متصفح Google Chrome تلقائياً بوضع ملء الشاشة
-google-chrome-stable --start-maximized --no-first-run --no-default-browser-check &
-EOF
-
-# 6. تخصيص قائمة النقر بالزر الأيمن للوصول السريع إلى Proton VPN ومتصفح الملفات
-cat << 'EOF' > config/includes.chroot/etc/xdg/openbox/menu.xml
-<?xml version="1.0" encoding="UTF-8"?>
-<openbox_menu xmlns="http://openbox.org/3.4/menu">
-<menu id="root-menu" label="Browser OS">
-  <item label="Google Chrome">
-    <action name="Execute"><command>google-chrome-stable</command></action>
-  </item>
-  <item label="Proton VPN">
-    <action name="Execute"><command>protonvpn-app</command></action>
-  </item>
-  <item label="File Manager (PCManFM)">
-    <action name="Execute"><command>pcmanfm</command></action>
-  </item>
-  <item label="Terminal">
-    <action name="Execute"><command>lxterminal</command></action>
-  </item>
-  <separator />
-  <item label="Reboot">
-    <action name="Execute"><command>sudo systemctl reboot</command></action>
-  </item>
-  <item label="Power Off">
-    <action name="Execute"><command>sudo systemctl poweroff</command></action>
-  </item>
-</menu>
-</openbox_menu>
-EOF
-
-# 7. تفعيل تشغيل الواجهة الرسومية تلقائياً فور دخول مستخدم النظام الحي (Live User)
-mkdir -p config/includes.chroot/etc/profile.d
-cat << 'EOF' > config/includes.chroot/etc/profile.d/autostartx.sh
-if [ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
-    startx
-fi
-EOF
-
-# 8. بدء عملية بناء ملف الـ ISO
-echo "[+] Building ISO image (this may take 10-15 minutes depending on internet speed)..."
-sudo lb build
-
-echo "[✓] Build Complete! Your ISO file is ready at: $WORKDIR/live-image-amd64.hybrid.iso"
+      - name: Upload ISO Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Browser-OS-Ready-ISO
+          path: browser-os/*.iso
