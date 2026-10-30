@@ -12,91 +12,61 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Build Tools
+      - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y live-build debootstrap curl wget gnupg squashfs-tools xorriso isolinux syslinux-efi
+          sudo apt-get install -y debootstrap squashfs-tools xorriso syslinux-common isolinux wget curl gnupg
 
-      - name: Configure Full Live System
+      - name: Build System ISO
         run: |
-          mkdir -p browser-os && cd browser-os
-          lb config noauto \
-            --distribution bookworm \
-            --architectures amd64 \
-            --linux-flavours amd64 \
-            --archive-areas "main contrib non-free non-free-firmware" \
-            --binary-images iso-hybrid \
-            --debian-installer false \
-            --apt-recommends false \
-            --bootappend-live "boot=live components quiet splash locales=en_US.UTF-8 keyboard-layouts=us,ara keyboard-options=grp:alt_shift_toggle modprobe.blacklist=ahci,ata_piix,nvme,nvme_core"
-
-          # الحزم الكاملة (واجهة Openbox خفيفة + متصفح ملفات + أدوات الشبكة)
-          mkdir -p config/package-lists
-          cat << 'EOF' > config/package-lists/desktop.list.chroot
-          xserver-xorg-core
-          xserver-xorg-video-nouveau
-          xserver-xorg-input-all
-          x11-xserver-utils
-          xinit
-          openbox
-          tint2
-          pcmanfm
-          lxterminal
-          network-manager
-          network-manager-gnome
-          pulseaudio
-          pavucontrol
-          firmware-misc-nonfree
-          firmware-realtek
-          libgl1-mesa-dri
-          curl
-          wget
-          gnupg
-          ca-certificates
-          fonts-noto-core
-          fonts-noto-color-emoji
-          sudo
-          EOF
-
-          # تثبيت Google Chrome و Proton VPN أثناء البناء
-          mkdir -p config/hooks/normal
-          cat << 'EOF' > config/hooks/normal/0500-install-apps.hook.chroot
-          #!/bin/bash
-          set -e
-          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
-          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+          # إنشاء هيكلية مجلدات التوزيعة الحية
+          mkdir -p iso_root/isolinux iso_root/casper
           
-          wget -q -O /tmp/proton.deb https://repo.protonvpn.com/debian/dists/stable/main/binary-all/protonvpn-stable-release_1.0.8_all.deb
-          dpkg -i /tmp/proton.deb && rm -f /tmp/proton.deb
+          # تثبيت نواة ديبيان وحزم النظام الأساسية
+          sudo debootstrap --arch=amd64 bookworm ./rootfs http://deb.debian.org/debian/
           
-          apt-get update
-          apt-get install -y --no-install-recommends google-chrome-stable proton-vpn-gnome-desktop
-          apt-get clean
+          # تثبيت متصفح كروم وتطبيق Proton VPN داخل النظام الأساسي
+          sudo chroot ./rootfs bash -c '
+            apt-get update && apt-get install -y --no-install-recommends wget curl gnupg ca-certificates sudo
+            
+            # تثبيت Google Chrome
+            wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+            echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+            
+            # تثبيت Proton VPN
+            wget -q -O /tmp/proton.deb https://repo.protonvpn.com/debian/dists/stable/main/binary-all/protonvpn-stable-release_1.0.8_all.deb
+            dpkg -i /tmp/proton.deb && rm -f /tmp/proton.deb
+            
+            apt-get update
+            apt-get install -y google-chrome-stable proton-vpn-gnome-desktop openbox tint2 pcmanfm network-manager xserver-xorg xinit
+            apt-get clean
+          '
+          
+          # ضغط النظام إلى ملف تشغيل حي
+          sudo mksquashfs ./rootfs iso_root/casper/filesystem.squashfs -comp xz -noappend
+          
+          # نسخ ملفات الإقلاع
+          cp /usr/lib/ISOLINux/isolinux.bin iso_root/isolinux/ || cp /usr/lib/isolinux/isolinux.bin iso_root/isolinux/
+          cp /usr/lib/syslinux/modules/bios/*.c32 iso_root/isolinux/ || true
+          
+          # إنشاء ملف إقلاع النظام وقواعد عزل الهاردات
+          cat << 'EOF' > iso_root/isolinux/isolinux.cfg
+          UI vesamenu.c32
+          TIMEOUT 50
+          DEFAULT browseros
+
+          LABEL browseros
+              SAY Booting Custom Browser OS...
+              KERNEL /casper/vmlinuz
+              INITRD /casper/initrd.lz
+              APPEND boot=live modprobe.blacklist=ahci,ata_piix,nvme quiet splash
           EOF
-          chmod +x config/hooks/normal/0500-install-apps.hook.chroot
 
-          # قاعدة أمان Udev: عزل الهاردات الداخلية كلياً
-          mkdir -p config/includes.chroot/etc/udev/rules.d
-          echo 'SUBSYSTEM=="block", ENV{ID_BUS}!="usb", ENV{UDISKS_IGNORE}="1", OPTIONS+="ignore_device"' > config/includes.chroot/etc/udev/rules.d/99-no-internal-disks.rules
+          # تصدير الملف بصيغة ISO نهائية
+          xorriso -as mkisofs -iso-level 3 -o final-browser-os.iso -joliet -rock -b isolinux/isolinux.bin -c isolinux/boot.cat -no-emul-boot -boot-load-size 4 -boot-info-table iso_root
 
-          # تشغيل كروم وتلقائياً بملء الشاشة مع الكيبورد العربي/الإنجليزي
-          mkdir -p config/includes.chroot/etc/xdg/openbox
-          cat << 'EOF' > config/includes.chroot/etc/xdg/openbox/autostart
-          setxkbmap -layout "us,ara" -option "grp:alt_shift_toggle" &
-          tint2 &
-          nm-applet &
-          google-chrome-stable --start-maximized --no-first-run --no-default-browser-check &
-          EOF
-
-          mkdir -p config/includes.chroot/etc/profile.d
-          cat << 'EOF' > config/includes.chroot/etc/profile.d/autostartx.sh
-          if [ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then startx; fi
-          EOF
-
-          sudo lb build
-
-      - name: Upload Full ISO Artifact
+      - name: Upload ISO Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Full-Browser-OS-ISO
-          path: browser-os/*.iso
+          path: final-browser-os.iso
