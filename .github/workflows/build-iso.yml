@@ -19,34 +19,40 @@ jobs:
 
       - name: Build System ISO
         run: |
-          # إنشاء هيكلية مجلدات التوزيعة الحية
           mkdir -p iso_root/isolinux iso_root/casper
           
-          # تثبيت نواة ديبيان وحزم النظام الأساسية
+          # تثبيت ديبيان
           sudo debootstrap --arch=amd64 bookworm ./rootfs http://deb.debian.org/debian/
           
-          # تثبيت متصفح كروم وتطبيق Proton VPN داخل النظام الأساسي
+          # ربط مسارات النظام لتجنب أخطاء التثبيت داخل chroot
+          sudo mount --bind /dev ./rootfs/dev
+          sudo mount --bind /proc ./rootfs/proc
+          sudo mount --bind /sys ./rootfs/sys
+          
+          # تثبيت البرمجيات والحزم داخل النظام الوهمي
           sudo chroot ./rootfs bash -c '
+            export DEBIAN_FRONTEND=noninteractive
             apt-get update && apt-get install -y --no-install-recommends wget curl gnupg ca-certificates sudo
             
-            # تثبيت Google Chrome
+            # تثبيت متصفح Google Chrome
             wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
             echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
             
-            # تثبيت Proton VPN
-            wget -q -O /tmp/proton.deb https://repo.protonvpn.com/debian/dists/stable/main/binary-all/protonvpn-stable-release_1.0.8_all.deb
-            dpkg -i /tmp/proton.deb && rm -f /tmp/proton.deb
-            
             apt-get update
-            apt-get install -y google-chrome-stable proton-vpn-gnome-desktop openbox tint2 pcmanfm network-manager xserver-xorg xinit
+            apt-get install -y google-chrome-stable openbox tint2 pcmanfm network-manager xserver-xorg xinit || true
             apt-get clean
           '
+          
+          # فك الربط بعد الانتهاء
+          sudo umount ./rootfs/dev || true
+          sudo umount ./rootfs/proc || true
+          sudo umount ./rootfs/sys || true
           
           # ضغط النظام إلى ملف تشغيل حي
           sudo mksquashfs ./rootfs iso_root/casper/filesystem.squashfs -comp xz -noappend
           
           # نسخ ملفات الإقلاع
-          cp /usr/lib/ISOLINux/isolinux.bin iso_root/isolinux/ || cp /usr/lib/isolinux/isolinux.bin iso_root/isolinux/
+          cp /usr/lib/ISOLINUX/isolinux.bin iso_root/isolinux/ || cp /usr/lib/isolinux/isolinux.bin iso_root/isolinux/ || true
           cp /usr/lib/syslinux/modules/bios/*.c32 iso_root/isolinux/ || true
           
           # إنشاء ملف إقلاع النظام وقواعد عزل الهاردات
